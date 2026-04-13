@@ -108,6 +108,7 @@ export default function App() {
   const [nextRefreshIn, setNextRefreshIn] = useState(AUTO_REFRESH_SECS);
   const [pullY, setPullY] = useState(0);
   const [isPulling, setIsPulling] = useState(false);
+  const [dataSource, setDataSource] = useState("");
   const scrollRef = useRef(null);
   const touchStartY = useRef(0);
 
@@ -126,10 +127,28 @@ export default function App() {
     setResults([]);
     setAiSummary("");
     setFetched(false);
+    setDataSource("");
 
-    const prompt = searchQuery
-      ? `Search for Q4 FY2026 (Jan–Mar 2026) quarterly earnings for Indian stocks matching "${searchQuery}". Return JSON array of 6-8 results.`
-      : `Search for Q4 FY2026 (January–March 2026) quarterly earnings results for major Indian listed companies. Return ONLY a JSON array for 8-10 companies:
+    let liveResults = [];
+
+    // ── Step 1: Try BSE live data via Vercel serverless proxy ──────────
+    if (!searchQuery) {
+      try {
+        const bseResp = await fetch("/api/results");
+        const bseData = await bseResp.json();
+        if (bseData.results?.length > 0) {
+          liveResults = bseData.results;
+          setDataSource("🟢 BSE Live");
+        }
+      } catch (_) { /* BSE unavailable, fall through to AI */ }
+    }
+
+    // ── Step 2: AI web search — for search queries OR BSE fallback ─────
+    if (liveResults.length === 0) {
+      try {
+        const prompt = searchQuery
+          ? `Search for Q4 FY2026 (Jan–Mar 2026) quarterly earnings for Indian stocks matching "${searchQuery}". Return JSON array of 6-8 results.`
+          : `Search for Q4 FY2026 (January–March 2026) quarterly earnings results for major Indian listed companies declared this week. Return ONLY a JSON array for 8-10 companies:
 [{
   "symbol": "RELIANCE",
   "name": "Reliance Industries Ltd",
@@ -146,25 +165,34 @@ export default function App() {
   "change": 8.4,
   "status": "beat"
 }]
-Use real recent web data. status = "beat", "miss", or "inline". Return ONLY JSON array, no other text.`;
+Use real recent web data. status = "beat", "miss", or "inline". Return ONLY JSON array.`;
 
+        const resp = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 1000,
+            tools: [{ type: "web_search_20250305", name: "web_search" }],
+            system: "Financial data assistant. Search web for real Q4 FY2026 Indian earnings. Return valid JSON arrays. Today is April 2026.",
+            messages: [{ role: "user", content: prompt }]
+          })
+        });
+        const data = await resp.json();
+        const fullText = data.content?.map(b => b.text || "").filter(Boolean).join("\n") || "";
+        const parsed = parseResults(fullText);
+        if (parsed.length > 0) {
+          liveResults = parsed;
+          setDataSource("🤖 AI Web Search");
+        }
+      } catch (_) { /* AI also failed */ }
+    }
+
+    setResults(liveResults.length > 0 ? liveResults : FALLBACK_DATA);
+    if (liveResults.length === 0) setDataSource("📦 Sample Data");
+
+    // ── Step 3: AI summary (always) ────────────────────────────────────
     try {
-      const resp = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          tools: [{ type: "web_search_20250305", name: "web_search" }],
-          system: "Financial data assistant. Search web for real Q4 FY2026 Indian earnings. Return valid JSON arrays. Today is April 2026.",
-          messages: [{ role: "user", content: prompt }]
-        })
-      });
-      const data = await resp.json();
-      const fullText = data.content?.map(b => b.text || "").filter(Boolean).join("\n") || "";
-      const parsed = parseResults(fullText);
-      setResults(parsed.length > 0 ? parsed : FALLBACK_DATA);
-
       const summaryResp = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -176,15 +204,11 @@ Use real recent web data. status = "beat", "miss", or "inline". Return ONLY JSON
       });
       const sd = await summaryResp.json();
       setAiSummary(sd.content?.[0]?.text || "");
-      setFetched(true);
-      setLastUpdated(new Date());
-      setNextRefreshIn(AUTO_REFRESH_SECS);
-    } catch {
-      setResults(FALLBACK_DATA);
-      setFetched(true);
-      setLastUpdated(new Date());
-      setNextRefreshIn(AUTO_REFRESH_SECS);
-    }
+    } catch (_) {}
+
+    setFetched(true);
+    setLastUpdated(new Date());
+    setNextRefreshIn(AUTO_REFRESH_SECS);
     setLoading(false);
   };
 
