@@ -27,23 +27,23 @@ function ResultCard({ result, index }) {
                 background: "rgba(48,209,88,0.2)", color: "#30d158",
                 fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 20,
                 border: "1px solid rgba(48,209,88,0.3)", letterSpacing: 0.5
-              }}>â BEAT</span>
+              }}>✓ BEAT</span>
             )}
             {isMiss && (
               <span style={{
                 background: "rgba(255,69,58,0.2)", color: "#ff453a",
                 fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 20,
                 border: "1px solid rgba(255,69,58,0.3)", letterSpacing: 0.5
-              }}>â MISS</span>
+              }}>✗ MISS</span>
             )}
           </div>
           <div style={{ color: "rgba(255,255,255,0.45)", fontSize: 12, marginTop: 2 }}>
-            {result.name} Â· {result.sector}
+            {result.name} · {result.sector}
           </div>
         </div>
         <div style={{ textAlign: "right" }}>
           <div style={{ color: isPositive ? "#30d158" : "#ff453a", fontWeight: 700, fontSize: 16 }}>
-            {isPositive ? "â²" : "â¼"} {Math.abs(result.change)}%
+            {isPositive ? "▲" : "▼"} {Math.abs(result.change)}%
           </div>
           <div style={{ color: "rgba(255,255,255,0.4)", fontSize: 11, marginTop: 2 }}>YoY PAT</div>
         </div>
@@ -72,7 +72,7 @@ function ResultCard({ result, index }) {
         borderTop: "1px solid rgba(255,255,255,0.06)",
         color: "rgba(255,255,255,0.4)", fontSize: 11
       }}>
-        ð Q{result.quarter} FY{result.fy} Â· Declared {result.date}
+        📅 Q{result.quarter} FY{result.fy} · Declared {result.date}
       </div>
     </div>
   );
@@ -108,6 +108,7 @@ export default function App() {
   const [nextRefreshIn, setNextRefreshIn] = useState(AUTO_REFRESH_SECS);
   const [pullY, setPullY] = useState(0);
   const [isPulling, setIsPulling] = useState(false);
+  const [dataSource, setDataSource] = useState("");
   const scrollRef = useRef(null);
   const touchStartY = useRef(0);
 
@@ -126,10 +127,28 @@ export default function App() {
     setResults([]);
     setAiSummary("");
     setFetched(false);
+    setDataSource("");
 
-    const prompt = searchQuery
-      ? `Search for Q4 FY2026 (JanâMar 2026) quarterly earnings for Indian stocks matching "${searchQuery}". Return JSON array of 6-8 results.`
-      : `Search for Q4 FY2026 (JanuaryâMarch 2026) quarterly earnings results for major Indian listed companies. Return ONLY a JSON array for 8-10 companies:
+    let liveResults = [];
+
+    // ── Step 1: Try BSE live data via Vercel serverless proxy ──────────
+    if (!searchQuery) {
+      try {
+        const bseResp = await fetch("/api/results");
+        const bseData = await bseResp.json();
+        if (bseData.results?.length > 0) {
+          liveResults = bseData.results;
+          setDataSource("🟢 BSE Live");
+        }
+      } catch (_) { /* BSE unavailable, fall through to AI */ }
+    }
+
+    // ── Step 2: AI web search — for search queries OR BSE fallback ─────
+    if (liveResults.length === 0) {
+      try {
+        const prompt = searchQuery
+          ? `Search for Q4 FY2026 (Jan–Mar 2026) quarterly earnings for Indian stocks matching "${searchQuery}". Return JSON array of 6-8 results.`
+          : `Search for Q4 FY2026 (January–March 2026) quarterly earnings results for major Indian listed companies declared this week. Return ONLY a JSON array for 8-10 companies:
 [{
   "symbol": "RELIANCE",
   "name": "Reliance Industries Ltd",
@@ -137,34 +156,43 @@ export default function App() {
   "quarter": 4,
   "fy": "2026",
   "date": "Apr 25, 2026",
-  "revenue": "â¹2.51L Cr",
+  "revenue": "₹2.51L Cr",
   "revenueGrowth": "+8.1%",
-  "pat": "â¹21,540 Cr",
+  "pat": "₹21,540 Cr",
   "patGrowth": "+8.4%",
-  "ebitda": "â¹48,600 Cr",
+  "ebitda": "₹48,600 Cr",
   "margin": "19.4",
   "change": 8.4,
   "status": "beat"
 }]
-Use real recent web data. status = "beat", "miss", or "inline". Return ONLY JSON array, no other text.`;
+Use real recent web data. status = "beat", "miss", or "inline". Return ONLY JSON array.`;
 
+        const resp = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 1000,
+            tools: [{ type: "web_search_20250305", name: "web_search" }],
+            system: "Financial data assistant. Search web for real Q4 FY2026 Indian earnings. Return valid JSON arrays. Today is April 2026.",
+            messages: [{ role: "user", content: prompt }]
+          })
+        });
+        const data = await resp.json();
+        const fullText = data.content?.map(b => b.text || "").filter(Boolean).join("\n") || "";
+        const parsed = parseResults(fullText);
+        if (parsed.length > 0) {
+          liveResults = parsed;
+          setDataSource("🤖 AI Web Search");
+        }
+      } catch (_) { /* AI also failed */ }
+    }
+
+    setResults(liveResults.length > 0 ? liveResults : FALLBACK_DATA);
+    if (liveResults.length === 0) setDataSource("📦 Sample Data");
+
+    // ── Step 3: AI summary (always) ────────────────────────────────────
     try {
-      const resp = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          tools: [{ type: "web_search_20250305", name: "web_search" }],
-          system: "Financial data assistant. Search web for real Q4 FY2026 Indian earnings. Return valid JSON arrays. Today is April 2026.",
-          messages: [{ role: "user", content: prompt }]
-        })
-      });
-      const data = await resp.json();
-      const fullText = data.content?.map(b => b.text || "").filter(Boolean).join("\n") || "";
-      const parsed = parseResults(fullText);
-      setResults(parsed.length > 0 ? parsed : FALLBACK_DATA);
-
       const summaryResp = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -176,15 +204,11 @@ Use real recent web data. status = "beat", "miss", or "inline". Return ONLY JSON
       });
       const sd = await summaryResp.json();
       setAiSummary(sd.content?.[0]?.text || "");
-      setFetched(true);
-      setLastUpdated(new Date());
-      setNextRefreshIn(AUTO_REFRESH_SECS);
-    } catch {
-      setResults(FALLBACK_DATA);
-      setFetched(true);
-      setLastUpdated(new Date());
-      setNextRefreshIn(AUTO_REFRESH_SECS);
-    }
+    } catch (_) {}
+
+    setFetched(true);
+    setLastUpdated(new Date());
+    setNextRefreshIn(AUTO_REFRESH_SECS);
     setLoading(false);
   };
 
@@ -236,7 +260,7 @@ Use real recent web data. status = "beat", "miss", or "inline". Return ONLY JSON
               LIVE EARNINGS
             </div>
             <h1 style={{ margin: "3px 0 0", fontSize: 26, fontWeight: 800, letterSpacing: -0.8, lineHeight: 1.1 }}>
-              Q4 Results Â· <span style={{ color: "#ffd60a" }}>FY 2026</span>
+              Q4 Results · <span style={{ color: "#ffd60a" }}>FY 2026</span>
             </h1>
           </div>
           <button onClick={() => fetchResults()} style={{
@@ -246,7 +270,7 @@ Use real recent web data. status = "beat", "miss", or "inline". Return ONLY JSON
           }}>
             {loading
               ? <span style={{ display: "inline-block", width: 14, height: 14, border: "2px solid #ffd60a", borderTopColor: "transparent", borderRadius: "50%", animation: "spin 0.7s linear infinite" }} />
-              : "â» Refresh"}
+              : "↻ Refresh"}
           </button>
         </div>
 
@@ -272,8 +296,8 @@ Use real recent web data. status = "beat", "miss", or "inline". Return ONLY JSON
         {/* Timestamps */}
         {fetched && (
           <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, color: "rgba(255,255,255,0.3)", fontSize: 11 }}>
-            <span>ð {lastUpdated ? lastUpdated.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "â"}</span>
-            <span>â³ {Math.floor(nextRefreshIn / 60)}:{String(nextRefreshIn % 60).padStart(2, "0")}</span>
+            <span>🕐 {lastUpdated ? lastUpdated.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "—"}</span>
+            <span>⟳ {Math.floor(nextRefreshIn / 60)}:{String(nextRefreshIn % 60).padStart(2, "0")}</span>
           </div>
         )}
       </div>
@@ -286,7 +310,7 @@ Use real recent web data. status = "beat", "miss", or "inline". Return ONLY JSON
           border: "1px solid rgba(255,214,10,0.2)", borderRadius: 14, padding: "11px 14px",
           animation: "slideUp 0.5s ease both"
         }}>
-          <div style={{ color: "#ffd60a", fontSize: 10, fontWeight: 700, marginBottom: 4, letterSpacing: 0.5 }}>â¦ AI MARKET SUMMARY</div>
+          <div style={{ color: "#ffd60a", fontSize: 10, fontWeight: 700, marginBottom: 4, letterSpacing: 0.5 }}>✦ AI MARKET SUMMARY</div>
           <div style={{ color: "rgba(255,255,255,0.75)", fontSize: 12, lineHeight: 1.5 }}>{aiSummary}</div>
         </div>
       )}
@@ -297,7 +321,7 @@ Use real recent web data. status = "beat", "miss", or "inline". Return ONLY JSON
           background: "rgba(255,255,255,0.07)", borderRadius: 12, padding: "10px 14px",
           display: "flex", alignItems: "center", gap: 8, border: "1px solid rgba(255,255,255,0.08)"
         }}>
-          <span style={{ color: "rgba(255,255,255,0.3)" }}>ð</span>
+          <span style={{ color: "rgba(255,255,255,0.3)" }}>🔍</span>
           <input
             value={query}
             onChange={e => setQuery(e.target.value)}
@@ -307,7 +331,7 @@ Use real recent web data. status = "beat", "miss", or "inline". Return ONLY JSON
           />
           {query && (
             <button onClick={() => { setQuery(""); fetchResults(); }}
-              style={{ background: "none", border: "none", color: "rgba(255,255,255,0.4)", cursor: "pointer", fontSize: 20, lineHeight: 1 }}>Ã</button>
+              style={{ background: "none", border: "none", color: "rgba(255,255,255,0.4)", cursor: "pointer", fontSize: 20, lineHeight: 1 }}>×</button>
           )}
         </div>
       </div>
@@ -378,7 +402,7 @@ Use real recent web data. status = "beat", "miss", or "inline". Return ONLY JSON
               ? filtered.map((r, i) => <ResultCard key={r.symbol + i} result={r} index={i} />)
               : (
                 <div style={{ textAlign: "center", padding: "60px 20px", color: "rgba(255,255,255,0.3)" }}>
-                  <div style={{ fontSize: 48, marginBottom: 12 }}>ð</div>
+                  <div style={{ fontSize: 48, marginBottom: 12 }}>📊</div>
                   <div style={{ fontSize: 16, fontWeight: 600, color: "rgba(255,255,255,0.5)", marginBottom: 6 }}>No results found</div>
                   <div style={{ fontSize: 13 }}>Try a different filter or search</div>
                 </div>
@@ -396,10 +420,10 @@ Use real recent web data. status = "beat", "miss", or "inline". Return ONLY JSON
         display: "grid", gridTemplateColumns: "repeat(4,1fr)", flexShrink: 0
       }}>
         {[
-          { icon: "ð", label: "Results", active: true },
-          { icon: "ð", label: "Alerts", active: false },
-          { icon: "ð", label: "Watchlist", active: false },
-          { icon: "âï¸", label: "Settings", active: false },
+          { icon: "📊", label: "Results", active: true },
+          { icon: "🔔", label: "Alerts", active: false },
+          { icon: "📈", label: "Watchlist", active: false },
+          { icon: "⚙️", label: "Settings", active: false },
         ].map(tab => (
           <div key={tab.label} style={{
             display: "flex", flexDirection: "column", alignItems: "center",
@@ -418,14 +442,13 @@ Use real recent web data. status = "beat", "miss", or "inline". Return ONLY JSON
 }
 
 const FALLBACK_DATA = [
-  { symbol: "RELIANCE", name: "Reliance Industries", sector: "Energy", quarter: 4, fy: "2026", date: "Apr 25, 2026", revenue: "â¹2.51L Cr", revenueGrowth: "+8.1%", pat: "â¹21,540 Cr", patGrowth: "+8.4%", ebitda: "â¹48,600 Cr", margin: "19.4", change: 8.4, status: "beat" },
-  { symbol: "HDFCBANK", name: "HDFC Bank Ltd", sector: "Banking", quarter: 4, fy: "2026", date: "Apr 19, 2026", revenue: "â¹89,340 Cr", revenueGrowth: "+16.1%", pat: "â¹17,616 Cr", patGrowth: "+5.5%", ebitda: "â¹23,400 Cr", margin: "26.2", change: 5.5, status: "inline" },
-  { symbol: "TCS", name: "Tata Consultancy Services", sector: "IT", quarter: 4, fy: "2026", date: "Apr 10, 2026", revenue: "â¹67,432 Cr", revenueGrowth: "+5.3%", pat: "â¹13,010 Cr", patGrowth: "+5.0%", ebitda: "â¹17,980 Cr", margin: "26.7", change: 5.0, status: "beat" },
-  { symbol: "INFY", name: "Infosys Ltd", sector: "IT", quarter: 4, fy: "2026", date: "Apr 17, 2026", revenue: "â¹44,820 Cr", revenueGrowth: "+7.3%", pat: "â¹7,288 Cr", patGrowth: "+7.1%", ebitda: "â¹10,510 Cr", margin: "23.4", change: 7.1, status: "beat" },
-  { symbol: "MARUTI", name: "Maruti Suzuki India", sector: "Auto", quarter: 4, fy: "2026", date: "Apr 29, 2026", revenue: "â¹41,200 Cr", revenueGrowth: "+6.3%", pat: "â¹3,920 Cr", patGrowth: "+5.2%", ebitda: "â¹5,480 Cr", margin: "13.3", change: 5.2, status: "inline" },
-  { symbol: "SUNPHARMA", name: "Sun Pharmaceutical", sector: "Pharma", quarter: 4, fy: "2026", date: "May 6, 2026", revenue: "â¹15,240 Cr", revenueGrowth: "+9.6%", pat: "â¹3,180 Cr", patGrowth: "+10.1%", ebitda: "â¹4,380 Cr", margin: "28.7", change: 10.1, status: "beat" },
-  { symbol: "BAJFINANCE", name: "Bajaj Finance Ltd", sector: "Banking", quarter: 4, fy: "2026", date: "Apr 28, 2026", revenue: "â¹22,640 Cr", revenueGrowth: "+19.3%", pat: "â¹4,980 Cr", patGrowth: "+15.6%", ebitda: "â¹7,620 Cr", margin: "33.7", change: 15.6, status: "beat" },
-  { symbol: "NESTLEIND", name: "NestlÃ© India Ltd", sector: "FMCG", quarter: 4, fy: "2026", date: "May 1, 2026", revenue: "â¹4,920 Cr", revenueGrowth: "+2.9%", pat: "â¹658 Cr", patGrowth: "-5.2%", ebitda: "â¹1,060 Cr", margin: "21.5", change: -5.2, status: "miss" },
-  { symbol: "ONGC", name: "Oil & Natural Gas Corp", sector: "Energy", quarter: 4, fy: "2026", date: "May 9, 2026", revenue: "â¹1.54L Cr", revenueGrowth: "-3.8%", pat: "â¹8,920 Cr", patGrowth: "-9.7%", ebitda: "â¹17,400 Cr", margin: "11.3", change: -9.7, status: "miss" },
+  { symbol: "RELIANCE", name: "Reliance Industries", sector: "Energy", quarter: 4, fy: "2026", date: "Apr 25, 2026", revenue: "₹2.51L Cr", revenueGrowth: "+8.1%", pat: "₹21,540 Cr", patGrowth: "+8.4%", ebitda: "₹48,600 Cr", margin: "19.4", change: 8.4, status: "beat" },
+  { symbol: "HDFCBANK", name: "HDFC Bank Ltd", sector: "Banking", quarter: 4, fy: "2026", date: "Apr 19, 2026", revenue: "₹89,340 Cr", revenueGrowth: "+16.1%", pat: "₹17,616 Cr", patGrowth: "+5.5%", ebitda: "₹23,400 Cr", margin: "26.2", change: 5.5, status: "inline" },
+  { symbol: "TCS", name: "Tata Consultancy Services", sector: "IT", quarter: 4, fy: "2026", date: "Apr 10, 2026", revenue: "₹67,432 Cr", revenueGrowth: "+5.3%", pat: "₹13,010 Cr", patGrowth: "+5.0%", ebitda: "₹17,980 Cr", margin: "26.7", change: 5.0, status: "beat" },
+  { symbol: "INFY", name: "Infosys Ltd", sector: "IT", quarter: 4, fy: "2026", date: "Apr 17, 2026", revenue: "₹44,820 Cr", revenueGrowth: "+7.3%", pat: "₹7,288 Cr", patGrowth: "+7.1%", ebitda: "₹10,510 Cr", margin: "23.4", change: 7.1, status: "beat" },
+  { symbol: "MARUTI", name: "Maruti Suzuki India", sector: "Auto", quarter: 4, fy: "2026", date: "Apr 29, 2026", revenue: "₹41,200 Cr", revenueGrowth: "+6.3%", pat: "₹3,920 Cr", patGrowth: "+5.2%", ebitda: "₹5,480 Cr", margin: "13.3", change: 5.2, status: "inline" },
+  { symbol: "SUNPHARMA", name: "Sun Pharmaceutical", sector: "Pharma", quarter: 4, fy: "2026", date: "May 6, 2026", revenue: "₹15,240 Cr", revenueGrowth: "+9.6%", pat: "₹3,180 Cr", patGrowth: "+10.1%", ebitda: "₹4,380 Cr", margin: "28.7", change: 10.1, status: "beat" },
+  { symbol: "BAJFINANCE", name: "Bajaj Finance Ltd", sector: "Banking", quarter: 4, fy: "2026", date: "Apr 28, 2026", revenue: "₹22,640 Cr", revenueGrowth: "+19.3%", pat: "₹4,980 Cr", patGrowth: "+15.6%", ebitda: "₹7,620 Cr", margin: "33.7", change: 15.6, status: "beat" },
+  { symbol: "NESTLEIND", name: "Nestlé India Ltd", sector: "FMCG", quarter: 4, fy: "2026", date: "May 1, 2026", revenue: "₹4,920 Cr", revenueGrowth: "+2.9%", pat: "₹658 Cr", patGrowth: "-5.2%", ebitda: "₹1,060 Cr", margin: "21.5", change: -5.2, status: "miss" },
+  { symbol: "ONGC", name: "Oil & Natural Gas Corp", sector: "Energy", quarter: 4, fy: "2026", date: "May 9, 2026", revenue: "₹1.54L Cr", revenueGrowth: "-3.8%", pat: "₹8,920 Cr", patGrowth: "-9.7%", ebitda: "₹17,400 Cr", margin: "11.3", change: -9.7, status: "miss" },
 ];
-
